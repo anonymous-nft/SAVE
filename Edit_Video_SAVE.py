@@ -1,4 +1,3 @@
-# From https://github.com/showlab/Tune-A-Video/blob/main/train_tuneavideo.py
 
 import argparse
 import datetime
@@ -26,10 +25,10 @@ from diffusers.utils.import_utils import is_xformers_available
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
 
-from tuneavideo.models.unet import UNet3DConditionModel
-from tuneavideo.data.dataset import TuneAVideoDataset
-from tuneavideo.pipelines.pipeline_tuneavideo import TuneAVideoPipeline
-from tuneavideo.util import save_videos_grid, ddim_inversion
+from video_utils.models.unet import UNet3DConditionModel
+from video_utils.data.dataset import SAVEVideoDataset
+from video_utils.pipelines.pipeline_save import SAVEVideoPipeline
+from video_utils.util import save_videos_grid, ddim_inversion
 from einops import rearrange
 
 
@@ -37,7 +36,6 @@ from einops import rearrange
 check_min_version("0.10.0.dev0")
 
 logger = get_logger(__name__, log_level="INFO")
-
 
 def main(
     pretrained_model_path: str,
@@ -58,7 +56,7 @@ def main(
     lr_warmup_steps: int = 0,
     adam_beta1: float = 0.9,
     adam_beta2: float = 0.999,
-    adam_weight_decay: float = 1e-2,
+    adam_weight_decay: float = 1e-3,
     adam_epsilon: float = 1e-08,
     max_grad_norm: float = 1.0,
     gradient_accumulation_steps: int = 1,
@@ -91,11 +89,11 @@ def main(
         transformers.utils.logging.set_verbosity_error()
         diffusers.utils.logging.set_verbosity_error()
 
-    # If passed along, set the training seed now.
+    ## If passed along, set the training seed now.
     if seed is not None:
         set_seed(seed)
 
-    # Handle the output folder creation
+    ## Handle the output folder creation
     if accelerator.is_main_process:
         os.makedirs(output_dir, exist_ok=True)
         os.makedirs(f"{output_dir}/samples", exist_ok=True)
@@ -122,39 +120,8 @@ def main(
     text_encoder.requires_grad_(False)
     unet.requires_grad_(False)
 
-    optim_params_1d = []
-    optim_params = []
 
-    for name, module in unet.named_modules():
-        if name.endswith(tuple(trainable_modules)):
-            print(name)
-            for params in module.parameters():
-                params.requires_grad = True
-                optim_params.append(params)
-
-    total_params = sum(p.numel() for p in optim_params)
-    print("Total Number of Parameters:", total_params)
-    print(f"Number of Trainable Parameters: {total_params * 1.e-6:.2f} M")
-
-
-
-                ### With Full Temporal Attention Layer Training and different learning rate###
-    # optim_params_1d = []
-    # optim_params = []
-    # optim_temp = []
-    # for name, module in unet.named_modules():
-    #     if name.endswith(tuple(trainable_modules)):
-    #         for name, params in module.named_parameters():
-    #             if 'delta' in name:
-    #                 params.requires_grad = True
-    #                 if "norm" in name:
-    #                     optim_params_1d.append(params)
-    #                 else:
-    #                     optim_params.append(params)
-    #             elif '_temp' in name:            # or 'attn2' in name
-    #                 params.requires_grad = True
-    #                 optim_temp.append(params)
-
+    ## Get the Optimizable Parameters
     optim_params_1d = []
     optim_params = []
     optim_temp = []
@@ -168,23 +135,16 @@ def main(
                     else:
                         optim_params.append(params)
 
-    # for name, module in unet.named_modules():
-    #     if '_temp' in name:                     ## or 'attn2' in name
-    #         # print("Module Name:", name)
-    #         for params in module.parameters():
-    #             params.requires_grad = True
-    #             optim_temp.append(params)
+    for name, module in unet.named_modules():
+        if '_temp' in name:                     ## or 'attn2' in name
+            for params in module.parameters():
+                params.requires_grad = True
+                optim_temp.append(params)
 
-    # for n, p in text_encoder.named_parameters():
-    #     if "delta" in n:
-    #         p.requires_grad = True
-    #         if "norm" in n:
-    #             optim_params_1d.append(p)
-    #         else:
-    #             optim_params.append(p)
-
-    total_params = sum(p.numel() for p in optim_params) + sum(p.numel() for p in optim_params_1d) # + sum(p.numel() for p in optim_temp)
+    # total_params = sum(p.numel() for p in optim_params) + sum(p.numel() for p in optim_params_1d) + sum(p.numel() for p in optim_temp)
+    total_params = sum(p.numel() for p in optim_params) + sum(p.numel() for p in optim_params_1d)
     print(f"Number of Trainable Parameters: {total_params* 1.e-6:.2f} M")
+
 
     if enable_xformers_memory_efficient_attention:
         if is_xformers_available():
@@ -214,7 +174,7 @@ def main(
         optimizer_cls = torch.optim.AdamW
 
     optimizer = optimizer_cls(
-        [{"params": optim_temp}, {"params": optim_params, "lr": 5*learning_rate}, {"params": optim_params_1d, "lr": 0.1*learning_rate}],
+        [{"params": optim_temp}, {"params": optim_params, "lr": learning_rate}, {"params": optim_params_1d, "lr": learning_rate}],
         lr=learning_rate,
         betas=(adam_beta1, adam_beta2),
         weight_decay=adam_weight_decay,
@@ -222,7 +182,7 @@ def main(
     )
 
     ## Get the training dataset
-    train_dataset = TuneAVideoDataset(**train_data)
+    train_dataset = SAVEVideoDataset(**train_data)
 
     ## Preprocessing the dataset
     train_dataset.prompt_ids = tokenizer(
@@ -235,7 +195,7 @@ def main(
     )
 
     ## Get the validation pipeline
-    validation_pipeline = TuneAVideoPipeline(
+    validation_pipeline = SAVEVideoPipeline(
         vae=vae, text_encoder=text_encoder, tokenizer=tokenizer, unet=unet,
         scheduler=DDIMScheduler.from_pretrained(pretrained_model_path, subfolder="scheduler")
     )
@@ -271,6 +231,16 @@ def main(
     if accelerator.is_main_process:
         accelerator.init_trackers("text2video-fine-tune")
 
+    print("... ... Saving Original Singular Values ... ...")
+    singular_values_initial = []
+    for name, module in unet.named_modules():
+        if name.endswith(tuple(trainable_modules)):
+            for name, params in module.named_parameters():
+                if "weight" in name:
+                    _, Sigma, _ = torch.linalg.svd(params.type(torch.FloatTensor), full_matrices=False)
+                    # print(Sigma.size())
+                    singular_values_initial.append(Sigma.to(accelerator.device))
+
     # Train!
     total_batch_size = train_batch_size * accelerator.num_processes * gradient_accumulation_steps
 
@@ -301,7 +271,7 @@ def main(
         first_epoch = global_step // num_update_steps_per_epoch
         resume_step = global_step % num_update_steps_per_epoch
 
-    # Only show the progress bar once on each machine.
+    ## Only show the progress bar once on each machine.
     progress_bar = tqdm(range(global_step, max_train_steps), disable=not accelerator.is_local_main_process)
     progress_bar.set_description("Steps")
 
@@ -328,7 +298,6 @@ def main(
                 # Sample noise that we'll add to the latents
                 noise = torch.randn_like(latents)
                 bsz = latents.shape[0]
-
                 # Sample a random timestep for each video
                 timesteps = torch.randint(0, noise_scheduler.num_train_timesteps, (bsz,), device=latents.device)
                 timesteps = timesteps.long()
@@ -350,7 +319,22 @@ def main(
 
                 # Predict the noise residual and compute loss
                 model_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
-                loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+
+                        #### Get the Regularizer ###
+                ## Step 1: Save the delta values
+                delta_values = []
+                for name, module in unet.named_modules():
+                    if name.endswith(tuple(trainable_modules)):
+                        for name, params in module.named_parameters():
+                            if 'delta' in name:
+                                delta_values.append(params)
+
+                ## Step 2: Get the regularized values
+                L_reg = 0
+                for i in range(len(delta_values)):
+                    L_reg += torch.matmul(delta_values[i].T, torch.matmul(torch.diag(singular_values_initial[i]), delta_values[i]))
+
+                loss = F.mse_loss(model_pred.float(), target.float(), reduction = "mean") + 1e-3 * L_reg
 
                 # Gather the losses across all processes for logging (if we use distributed training).
                 avg_loss = accelerator.gather(loss.repeat(train_batch_size)).mean()
@@ -415,7 +399,7 @@ def main(
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         unet = accelerator.unwrap_model(unet)
-        pipeline = TuneAVideoPipeline.from_pretrained(
+        pipeline = SAVEVideoPipeline.from_pretrained(
             pretrained_model_path,
             text_encoder=text_encoder,
             vae=vae,
@@ -428,7 +412,7 @@ def main(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="./configs/car-turn.yaml")
+    parser.add_argument("--config", type=str, default="./configs/man-skiing.yaml")
     args = parser.parse_args()
 
     main(**OmegaConf.load(args.config))
