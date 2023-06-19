@@ -1,8 +1,8 @@
 # Implementation of SAVE Algorithm.
 
 First, create a conda environment using this
-  
-  conda create -n save
+	
+ 	conda create -n save
 
 First Install the following packages-
 	
@@ -10,6 +10,6 @@ First Install the following packages-
 	
 Run the following command to edit a given video. 
 	
-	python Edit_Video.py
+	python Edit_Video_SAVE.py
 	
 Change the "--config" option in arguments to provide a new video.
